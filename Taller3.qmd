@@ -1,0 +1,1030 @@
+---
+title: "Aglomeración Industrial en Cali: El Caso de la Fabricación de Calzado"
+subtitle: "Taller 3 - Econometría Espacial"
+author: "Sofía Morales López"
+date: today
+format: 
+  html:
+    toc: true
+    toc-depth: 3
+    code-fold: true
+    self-contained: true
+    theme: flatly
+lang: es
+---
+
+# Taller 3
+
+```{r}
+#| label: setup
+#| include: false
+
+library(tidyverse)
+library(sf)
+library(tmap)
+library(spatstat)
+library(ggplot2)
+library(viridis)
+library(knitr)
+library(kableExtra)
+library(ggnewscale)
+library(dbmss)
+library(spatstat.geom)
+library(ragg)
+
+knitr::opts_chunk$set(
+  dev = "ragg_png",
+  dpi = 300
+)
+# Datos
+setwd("/Users/sofiamoraleslopez/Desktop/Economía/Noveno Semestre/Econometría Espacial/Actividad 3")
+barriosCali <- st_read("Barrios/BARRIOS.shp", quiet = TRUE)
+data <- read.csv("datar.csv", header = TRUE, sep = ",", dec = ".")
+
+# Sector calzado
+calzado_192 <- data %>% filter(ciiu_3 == 192)
+```
+
+# Introducción
+
+La localización de la actividad económica en el espacio no es aleatoria. Las empresas tienden a concentrarse en determinadas zonas urbanas buscando aprovechar externalidades positivas derivadas de la proximidad, como el acceso a mano de obra especializada, proveedores comunes y transferencia de conocimiento, fenómeno conocido en la literatura como economías de aglomeración (Marshall, 1890; Ellison y Glaeser, 1997).
+
+En el caso de Cali, García y Moreno-Monroy (2016) documentan que el sector de fabricación de calzado (CIIU 192) es una de las industrias con mayor tendencia a la aglomeración espacial en el área metropolitana de Cali y Yumbo, ocupando el tercer lugar entre las industrias con mayor grado de concentración geográfica, con patrones significativos en rangos de distancia de hasta 11 kilómetros. Para el año 2005, el sector registraba 354 empresas que empleaban a 1.692 personas, con una marcada segmentación entre empresas formales e informales, donde las primeras exhiben niveles de concentración considerablemente más altos. Adicionalmente, el sector muestra vínculos espaciales estrechos con las industrias de muebles y confecciones, dado el uso compartido de insumos como el cuero y tipos similares de mano de obra.
+
+Este documento analiza los patrones de concentración espacial de la fabricación de calzado (CIIU Rev. 3: código 192) en Cali, utilizando datos del Censo Económico 2005, un registro georeferenciado de 4.857 establecimientos para todos los sectores económicos de la ciudad. El sector de calzado comprende 352 empresas distribuidas en 7 subsectores a cuatro dígitos (CIIU 4), siendo la fabricación de calzado de cuero y piel (1921) el subsector dominante con 125 establecimientos.
+
+El análisis se lleva a cabo en dos niveles de desagregación: el sector a tres dígitos (192) y sus subsectores a cuatro dígitos, combinando herramientas de análisis exploratorio espacial, índices de concentración sectorial y funciones de distancia continua, implementadas en Rstudio.
+
+El documento se organiza de la siguiente manera: la sección de Datos y Metodología describe las fuentes y métodos empleados; el Punto 1 presenta el análisis exploratorio espacial; el Punto 2 reporta los índices de concentración; el Punto 3 muestra el mapa del LQ; y finalmente, el Punto 4 estima las funciones de distancia.
+
+# Datos y Metodología
+
+## Fuente de Datos
+
+Los datos utilizados en este análisis provienen del Censo Económico 2005 de Cali, un registro georeferenciado de establecimientos económicos levantado por el Departamento Administrativo de Planeación Municipal de Cali. El censo cubre todos los sectores económicos de la ciudad y contiene información sobre la localización geográfica (coordenadas x, y), clasificación industrial (CIIU Rev. 3 a 2, 3 y 4 dígitos), formalidad del establecimiento y comuna y barrio de ubicación, entre otras variables.
+
+El censo registra un total de 4.857 establecimientos, de los cuales 352 pertenecen al sector de fabricación de calzado (CIIU 3: 192), representando el 7,2% del total de la actividad económica censada. El análisis espacial se complementa con el shapefile de barrios oficiales de Cali, que permite contextualizar geográficamente los patrones de localización identificados.
+
+## Sector Analizado
+
+El sector analizado corresponde a la fabricación de calzado (CIIU Rev. 3: 192), el cual se desagrega en siete subsectores a cuatro dígitos, como se presenta en la Tabla 1.
+
+```{r}
+#| label: tbl-ciiu4
+#| tbl-cap: "Distribución de empresas por subsector CIIU 4 - Fabricación de Calzado, Cali 2005"
+#| message: false
+#| warning: false
+
+calzado_192 %>%
+  count(ciiu_4, label_ciiu4) %>%
+  mutate(
+    porcentaje = round(n / sum(n) * 100, 1),
+    label_ciiu4 = case_when(
+      ciiu_4 == 1921 ~ "Fabricación de calzado de cuero y piel",
+      ciiu_4 == 1922 ~ "Fabricación de calzado de materiales textiles",
+      ciiu_4 == 1923 ~ "Fabricación de calzado de caucho",
+      ciiu_4 == 1924 ~ "Fabricación de calzado de plástico",
+      ciiu_4 == 1925 ~ "Fabricación de calzado deportivo",
+      ciiu_4 == 1926 ~ "Fabricación de partes del calzado",
+      ciiu_4 == 1929 ~ "Fabricación de calzado NCP",
+      TRUE ~ label_ciiu4
+    )
+  ) %>%
+  rename(
+    `Código CIIU 4` = ciiu_4,
+    `Descripción` = label_ciiu4,
+    `N° Empresas` = n,
+    `Participación (%)` = porcentaje
+  ) %>%
+  kable(align = c("c", "l", "c", "c")) %>%
+  kable_styling(
+    bootstrap_options = c("striped", "hover", "condensed"),
+    full_width = FALSE
+  ) %>%
+  row_spec(0, bold = TRUE)
+```
+
+## Metodología
+
+El análisis se estructura en cuatro etapas siguiendo la literatura de economías de aglomeración. Primero, se realiza un análisis exploratorio espacial mediante mapas de distribución de puntos y estimación de densidad kernel (KDE), con el fin de identificar visualmente los patrones de concentración geográfica. Segundo, se calculan índices de concentración espacial, como el de Herfindahl-Hirschman (IHH), Ellison y Glaeser (1997), Maurel y Sédillot (1999), y Location Quotient (LQ) e Industry Quotient (IQ), que permiten cuantificar el grado de aglomeración del sector. Tercero, se construye el mapa del LQ por comuna para identificar las unidades espaciales con mayor especialización en el sector. Finalmente, se estiman las funciones de distancia de Duranton y Overman (2005) y Marcon y Puech (2010), que evalúan la concentración espacial de manera continua a diferentes distancias, evitando el problema de la Unidad de Área Modificable (MAUP). Todo el análisis se realiza en Rstudio, utilizando principalmente los paquetes `sf`, `tmap`, `spatstat`, `ggplot2` y `dbmss`.
+
+# Punto 1: Mapa de Densidad y Distribución de Puntos
+
+::: {.callout-note title="Punto 1 del Taller"}
+Realice el mapa de densidad y distribución de puntos de las empresas del sector seleccionado. Interprete los resultados en términos de la localización de las mayores densidades. Indague sobre el contexto de esta industria en Cali para dar una explicación con sentido económico.
+:::
+
+## Distribución de Puntos
+
+```{r}
+#| label: fig-puntos-192
+#| fig-cap: "Distribución de puntos y densidad kernel - Fabricación de calzado (CIIU 192), Cali 2005"
+#| message: false
+#| warning: false
+
+# Convertir a objeto sf
+calzado_sf <- calzado_192 %>%
+  st_as_sf(coords = c("x", "y"), crs = st_crs(barriosCali))
+
+ggplot() +
+  geom_sf(data = barriosCali,
+          aes(fill = "Barrio"),
+          color = "grey50", linewidth = 0.25) +
+  scale_fill_manual(values = c("Barrio" = "grey95"),
+                    name = "",
+                    guide = guide_legend(order = 1,
+                      keywidth = unit(0.3, "cm"),
+                      keyheight = unit(0.3, "cm"),
+                      override.aes = list(alpha = 0.1),
+                      label.theme = element_text(size = 6))) +
+  geom_sf(data = calzado_sf, color = "red", size = 0.5, alpha = .3) +
+  new_scale_fill() +
+  stat_density_2d(data = calzado_192,
+                  aes(x = x, y = y, fill = after_stat(level)),
+                  geom = "polygon",
+                  alpha = 0.4,
+                  color = NA,
+                  show.legend = TRUE) +
+  scale_fill_viridis_c(option = "viridis",
+                       breaks = function(x) range(x),
+                       labels = c("Mín", "Máx"),
+                       name = "Densidad",
+                       guide = guide_colorbar(order = 1,
+                                              barwidth = unit(0.3, "cm"),
+                                              barheight = unit(.5, "cm"),
+                                              title.theme = element_text(size = 6),
+                                              label.theme = element_text(size = 6))) +
+  theme_void() +
+  theme(legend.position = c(0.2, 0.2),
+        legend.title = element_text(size = 10),
+        legend.spacing.y = unit(-0.3, "cm"))
+```
+
+```{r}
+#| label: barrios-top
+#| message: false
+#| warning: false
+
+calzado_192 %>%
+  count(barrio, cod_comuna) %>%
+  arrange(desc(n)) %>%
+  head(10)
+```
+
+```{r}
+#| label: fig-puntos-ciiu4
+#| fig-cap: "Distribución de puntos y densidad kernel por subsector CIIU 4, Cali 2005"
+#| message: false
+#| warning: false
+#| fig-width: 10
+#| fig-height: 16
+
+# Crear sf para todos los CIIU4
+calzado_ciiu4_sf <- calzado_192 %>%
+  mutate(label_ciiu4 = case_when(
+    ciiu_4 == 1921 ~ "1921 - Cuero y piel",
+    ciiu_4 == 1922 ~ "1922 - Textiles",
+    ciiu_4 == 1923 ~ "1923 - Caucho",
+    ciiu_4 == 1924 ~ "1924 - Plástico",
+    ciiu_4 == 1925 ~ "1925 - Deportivo",
+    ciiu_4 == 1926 ~ "1926 - Partes",
+    ciiu_4 == 1929 ~ "1929 - NCP"
+  )) %>%
+  st_as_sf(coords = c("x", "y"), crs = st_crs(barriosCali))
+
+ggplot() +
+  geom_sf(data = barriosCali,
+          aes(fill = "Barrio"),
+          color = "grey50", linewidth = 0.25) +
+  scale_fill_manual(values = c("Barrio" = "grey95"),
+                    name = "",
+                    guide = guide_legend(
+                      keywidth = unit(0.3, "cm"),
+                      keyheight = unit(0.3, "cm"),
+                      override.aes = list(alpha = 0.1),
+                      label.theme = element_text(size = 6))) +
+  geom_sf(data = calzado_ciiu4_sf, color = "red", size = 0.05, alpha = .3) +
+  new_scale_fill() +
+  stat_density_2d(data = calzado_192 %>%
+                    mutate(label_ciiu4 = case_when(
+                      ciiu_4 == 1921 ~ "1921 - Cuero y piel",
+                      ciiu_4 == 1922 ~ "1922 - Textiles",
+                      ciiu_4 == 1923 ~ "1923 - Caucho",
+                      ciiu_4 == 1924 ~ "1924 - Plástico",
+                      ciiu_4 == 1925 ~ "1925 - Deportivo",
+                      ciiu_4 == 1926 ~ "1926 - Partes",
+                      ciiu_4 == 1929 ~ "1929 - NCP"
+                    )),
+                  aes(x = x, y = y, fill = after_stat(level)),
+                  geom = "polygon",
+                  alpha = 0.4,
+                  color = NA,
+                  show.legend = TRUE) +
+  scale_fill_viridis_c(option = "viridis",
+                       breaks = function(x) range(x),
+                       labels = c("Mín", "Máx"),
+                       name = "Densidad",
+                       guide = guide_colorbar(order = 1,
+                                      barwidth = unit(0.5, "cm"),
+                                      barheight = unit(.5, "cm"),
+                                      title.theme = element_text(size = 8),
+                                      label.theme = element_text(size = 8))) +
+  facet_wrap(~ label_ciiu4, ncol = 4) +
+  theme_void() +
+  theme(
+    legend.position = "bottom",
+    legend.title = element_text(size = 8),
+    legend.spacing.y = unit(-0.3, "cm"),
+    strip.text = element_text(size = 8, face = "bold"),
+    panel.spacing = unit(0.5, "cm")
+  )
+```
+
+## Interpretación
+
+El mapa del sector 192 en su conjunto revela un patrón de concentración espacial marcado y no aleatorio en la industria del calzado en Cali. La mayor densidad se localiza en la Comuna 9, particularmente en los barrios Sucre (42 empresas) y Barrio Obrero (38 empresas), que en conjunto concentran cerca del 23% del total de establecimientos del sector. Esta zona corresponde al centro comercial e industrial tradicional de Cali, históricamente asociado a actividades manufactureras de pequeña escala y al comercio mayorista.
+
+Al desagregar por subsector CIIU 4, se observan patrones diferenciados pero complementarios. Los subsectores de mayor tamaño, cuero y piel (1921) y NCP (1929), muestran una distribución más dispersa a lo largo del eje centro-oriente de la ciudad, lo que sugiere que su mayor número de establecimientos permite ocupar un territorio más amplio. Por el contrario, los subsectores más pequeños como caucho (1923), plástico (1924) y deportivo (1925) exhiben núcleos de densidad más compactos y concentrados, lo que indica una mayor tendencia a la localización cercana entre empresas del mismo subsector.
+
+Estos patrones son consistentes con las economías de aglomeración de tipo Marshall, ya que la proximidad entre empresas facilita el acceso a mano de obra especializada (matching), el intercambio de conocimiento tácito sobre procesos productivos (learning), y el aprovechamiento de proveedores comunes de insumos como cuero, suelas y materiales textiles (sharing) (Duranton y Puga, 2004). Adicionalmente, la segmentación espacial observada entre subsectores es consistente con los hallazgos de García y Moreno-Monroy (2016) sobre la diferenciación territorial de la industria del calzado en el área metropolitana de Cali.
+
+Este patrón de concentración también es coherente con el contexto económico de Cali y del Valle del Cauca en 2005. El Censo Económico de Cali y Yumbo fue concebido para caracterizar una estructura urbana basada en industria, comercio y servicios, y registró 78.521 unidades económicas en ambos municipios, lo que muestra una base empresarial densa y diversificada (DANE, 2005; Cámara de Comercio de Cali, 2006). En ese entorno, la industria del calzado en Cali parece haber funcionado no solo como una actividad manufacturera, sino como una actividad estrechamente articulada con circuitos urbanos de comercialización, distribución y abastecimiento. Esto ayuda a explicar por qué las mayores densidades se ubican en la Comuna 9, una zona central tradicionalmente vinculada a pequeños talleres, comercio mayorista y redes de proveedores, donde la proximidad al mercado y a otros establecimientos del mismo ramo generaba ventajas de localización.
+
+A esto se suma que, aunque 2005 fue un año de recuperación económica regional, el sector de cuero y calzado enfrentaba presiones competitivas importantes. El Informe de Coyuntura Económica Regional del Valle del Cauca señalaba que sectores intensivos en mano de obra como confecciones, textiles, cuero y calzado venían sintiendo el efecto de menores reintegros por ventas externas, en un contexto de apreciación cambiaria, aun cuando la economía regional mostraba crecimiento y las exportaciones industriales del departamento aumentaban durante el año (Banco de la República de Colombia & DANE, 2005a, 2005b). Además, para ese mismo momento los industriales del sector advertían que las importaciones de calzado habían aumentado 37,6 %, principalmente desde China, Panamá, Ecuador y Brasil, y que el ingreso de importaciones y contrabando representaba una porción muy alta del consumo nacional, afectando la producción y el empleo del sector (Redacción Portafolio, 2006a, 2006b). En este contexto, la concentración espacial observada en Cali puede interpretarse como una respuesta económica racional, ante una competencia externa creciente, las firmas tenían incentivos a ubicarse en zonas donde pudieran reducir costos, aprovechar economías de aglomeración y sostener redes cortas de producción y comercialización.
+
+
+# Punto 2: Índices de Concentración Espacial
+
+::: {.callout-note title="Punto 2 del Taller"}
+Calcule los siguientes índices de concentración e interprételos con sentido económico, dado el contexto de la ciudad: Índice de Herfindahl-Hirschman (IHH), Índice de Ellison y Glaeser con la significancia estadística, Índice de Maurel y Sédillot, LQ e IQ.
+:::
+
+## 2.1 Índice de Herfindahl-Hirschman (IHH)
+
+El Índice de Herfindahl-Hirschman mide la concentración industrial a partir de la suma de los cuadrados de las participaciones de cada empresa en el empleo total del sector. Un valor cercano a 0 indica un sector con muchas empresas de tamaño similar (baja concentración), mientras que un valor cercano a 1 indica que el sector está dominado por pocas empresas grandes (alta concentración). 
+
+```{r}
+#| label: ihh
+#| message: false
+#| warning: false
+
+# IHH para CIIU3 = 192
+ihh_192 <- calzado_192 %>%
+  mutate(z_j = calzado_192$ue026a1_nu / sum(calzado_192$ue026a1_nu, na.rm = TRUE)) %>%
+  summarise(IHH = round(sum(z_j^2, na.rm = TRUE), 4)) %>%
+  mutate(`Código CIIU 4` = "192",
+         `Descripción` = "Fabricación de calzado (Total)")
+
+# IHH por CIIU4
+ihh_ciiu4 <- calzado_192 %>%
+  group_by(ciiu_4, label_ciiu4) %>%
+  mutate(z_j = ue026a1_nu / sum(ue026a1_nu, na.rm = TRUE)) %>%
+  summarise(IHH = round(sum(z_j^2, na.rm = TRUE), 4), .groups = "drop") %>%
+  mutate(label_ciiu4 = case_when(
+    ciiu_4 == 1921 ~ "Fabricación de calzado de cuero y piel",
+    ciiu_4 == 1922 ~ "Fabricación de calzado de materiales textiles",
+    ciiu_4 == 1923 ~ "Fabricación de calzado de caucho",
+    ciiu_4 == 1924 ~ "Fabricación de calzado de plástico",
+    ciiu_4 == 1925 ~ "Fabricación de calzado deportivo",
+    ciiu_4 == 1926 ~ "Fabricación de partes del calzado",
+    ciiu_4 == 1929 ~ "Fabricación de calzado NCP"
+  )) %>%
+  rename(`Código CIIU 4` = ciiu_4,
+         `Descripción` = label_ciiu4) %>%
+  mutate(`Código CIIU 4` = as.character(`Código CIIU 4`))
+
+# Unir en una sola tabla con el total arriba
+bind_rows(ihh_192, ihh_ciiu4) %>%
+  select(`Código CIIU 4`, `Descripción`, IHH) %>%
+  kable(align = c("c", "l", "c"),
+        caption = "Índice de Herfindahl-Hirschman - Fabricación de Calzado, Cali 2005") %>%
+  kable_styling(
+    bootstrap_options = c("striped", "hover", "condensed"),
+    full_width = FALSE
+  ) %>%
+  row_spec(0, bold = TRUE) %>%
+  row_spec(1, bold = TRUE, background = "#f0f0f0")
+```
+
+### Interpretación
+
+El sector de fabricación de calzado en su conjunto (CIIU 192) presenta un IHH de \(0.0203\), lo que indica una estructura industrial relativamente fragmentada, compuesta por muchas empresas pequeñas sin que ninguna domine el empleo sectorial. Este resultado es consistente con una actividad productiva de base artesanal y de pequeña escala, en la que predominan talleres y establecimientos manufactureros con baja capacidad de concentración individual del empleo. En relación con el patrón espacial observado en el Punto 1, este resultado sugiere que la concentración territorial del sector en ciertas zonas de Cali no está asociada a la dominancia de unas pocas firmas grandes, sino a la co-localización de numerosos establecimientos pequeños.
+
+Al desagregar por subsector CIIU 4, se observa una mayor concentración industrial en la fabricación de partes del calzado (1926, \(IHH = 0.0935\)) y calzado deportivo (1925, \(IHH = 0.0930\)), seguidos por calzado de materiales textiles (1922, \(IHH = 0.0809\)) y calzado de caucho (1923, \(IHH = 0.0714\)). Esto sugiere que, dentro de estos subsectores, una fracción relativamente pequeña de empresas concentra una mayor participación del empleo, posiblemente porque se trata de segmentos más reducidos, con menor número de firmas activas y mayores diferencias de escala entre establecimientos.
+
+En contraste, los subsectores de calzado NCP (1929, \(IHH = 0.0192\)) y calzado de plástico (1924, \(IHH = 0.0509\)) presentan estructuras menos concentradas. En el caso de 1929, el valor particularmente bajo del índice sugiere una distribución del empleo más atomizada entre empresas, compatible con una oferta más diversificada y con menores barreras a la entrada en comparación con otros segmentos del sector.
+
+En términos económicos, estos resultados indican que la industria del calzado en Cali no estaba dominada por grandes firmas, sino organizada alrededor de una estructura productiva ampliamente distribuida entre muchos establecimientos pequeños. Esta configuración es coherente con una industria urbana tradicional en la que la competencia se da más entre numerosos productores de pequeña escala que a través del liderazgo de unas pocas empresas grandes. En ese sentido, el IHH complementa la evidencia del Punto 1: mientras el mapa mostró dónde se concentraban espacialmente las empresas, este índice permite concluir que esa concentración geográfica coexistía con una estructura industrial poco concentrada en términos de tamaño empresarial.
+
+
+## 2.2 Índice de Ellison y Glaeser (EG)
+
+El índice de Ellison y Glaeser (1997) mide la concentración geográfica de una industria controlando por la estructura de tamaño de las empresas a través del IHH calculado anteriormente. El índice $\hat{\gamma}_{EG}$ se interpreta de la siguiente manera:
+
+- $\hat{\gamma}_{EG} < 0$: dispersión geográfica
+- $\hat{\gamma}_{EG} < 0.02$: baja concentración geográfica
+- $0.02 \leq \hat{\gamma}_{EG} \leq 0.05$: moderada concentración geográfica
+- $\hat{\gamma}_{EG} > 0.05$: alta concentración geográfica
+
+```{r}
+#| label: eg
+#| message: false
+#| warning: false
+
+# Función para calcular el índice EG
+calc_eg <- function(df_sector, df_total, geo_var = "cod_comuna", emp_var = "ue026a1_nu") {
+  
+  # Empleo total del sector
+  emp_total_sector <- sum(df_sector[[emp_var]], na.rm = TRUE)
+  
+  # Participación de cada empresa en el empleo sectorial (z_j)
+  df_sector <- df_sector %>%
+    mutate(z_j = .data[[emp_var]] / emp_total_sector)
+  
+  # IHH
+  H <- sum(df_sector$z_j^2, na.rm = TRUE)
+  
+  # Participación del empleo sectorial por área (s_i)
+  s_i <- df_sector %>%
+    group_by(.data[[geo_var]]) %>%
+    summarise(emp_sector = sum(.data[[emp_var]], na.rm = TRUE)) %>%
+    mutate(s_i = emp_sector / emp_total_sector)
+  
+  # Participación del empleo total por área (x_i) — usando df_total
+  emp_total_ciudad <- sum(df_total[[emp_var]], na.rm = TRUE)
+  
+  x_i <- df_total %>%
+    group_by(.data[[geo_var]]) %>%
+    summarise(emp_total_area = sum(.data[[emp_var]], na.rm = TRUE)) %>%
+    mutate(x_i = emp_total_area / emp_total_ciudad)
+  
+  # Unir s_i y x_i
+  indices <- s_i %>%
+    left_join(x_i, by = geo_var) %>%
+    mutate(diff2 = (s_i - x_i)^2,
+           x_i2  = x_i^2)
+  
+  # G_EG y suma de x_i^2
+  G_EG    <- sum(indices$diff2, na.rm = TRUE)
+  sum_x2  <- sum(indices$x_i2, na.rm = TRUE)
+  
+  # gamma EG
+  gamma_EG <- (G_EG / (1 - sum_x2) - H) / (1 - H)
+  
+  return(list(gamma_EG = round(gamma_EG, 4), H = round(H, 4), G_EG = round(G_EG, 4)))
+}
+
+#  EG para CIIU 192
+eg_192 <- calc_eg(calzado_192, data)
+
+# EG para cada CIIU4
+eg_ciiu4 <- calzado_192 %>%
+  group_by(ciiu_4) %>%
+  group_map(~ calc_eg(.x, data)) %>%
+  bind_rows() %>%
+  mutate(ciiu_4 = sort(unique(calzado_192$ciiu_4)),
+         Descripción = case_when(
+           ciiu_4 == 1921 ~ "Fabricación de calzado de cuero y piel",
+           ciiu_4 == 1922 ~ "Fabricación de calzado de materiales textiles",
+           ciiu_4 == 1923 ~ "Fabricación de calzado de caucho",
+           ciiu_4 == 1924 ~ "Fabricación de calzado de plástico",
+           ciiu_4 == 1925 ~ "Fabricación de calzado deportivo",
+           ciiu_4 == 1926 ~ "Fabricación de partes del calzado",
+           ciiu_4 == 1929 ~ "Fabricación de calzado NCP"
+         ),
+         Concentración = case_when(
+           gamma_EG < 0     ~ "Dispersión",
+           gamma_EG < 0.02  ~ "Baja",
+           gamma_EG <= 0.05 ~ "Moderada",
+           gamma_EG > 0.05  ~ "Alta"
+         ))
+
+# Tabla
+bind_rows(
+  tibble(ciiu_4 = 192,
+         Descripción = "Fabricación de calzado (Total)",
+         gamma_EG = eg_192$gamma_EG,
+         Concentración = case_when(
+           eg_192$gamma_EG < 0     ~ "Dispersión",
+           eg_192$gamma_EG < 0.02  ~ "Baja",
+           eg_192$gamma_EG <= 0.05 ~ "Moderada",
+           eg_192$gamma_EG > 0.05  ~ "Alta"
+         )),
+  eg_ciiu4
+) %>%
+  select(`Código CIIU` = ciiu_4, Descripción,
+         `$\\hat{\\gamma}_{EG}$` = gamma_EG,
+         Concentración) %>%
+  kable(align = c("c", "l", "c", "c"),
+        caption = "Índice de Ellison y Glaeser - Fabricación de Calzado, Cali 2005") %>%
+  kable_styling(
+    bootstrap_options = c("striped", "hover", "condensed"),
+    full_width = FALSE
+  ) %>%
+  row_spec(0, bold = TRUE) %>%
+  row_spec(1, bold = TRUE, background = "#f0f0f0")
+```
+
+```{r}
+# Significancia estadística EG 
+# Bajo H0: gamma = 0, la varianza de G_EG es:
+# Var(G_EG) = 2*(1 - sum(x_i^2))^2 * (1-H)^2 / (N*(N-1)) donde N es el número de empresas
+
+calc_eg_sig <- function(df_sector, df_total, geo_var = "cod_comuna", emp_var = "ue026a1_nu") {
+  
+  eg <- calc_eg(df_sector, df_total, geo_var, emp_var)
+  N  <- nrow(df_sector)
+  
+  emp_total_ciudad <- sum(df_total[[emp_var]], na.rm = TRUE)
+  
+  x_i <- df_total %>%
+    group_by(.data[[geo_var]]) %>%
+    summarise(emp_total_area = sum(.data[[emp_var]], na.rm = TRUE)) %>%
+    mutate(x_i = emp_total_area / emp_total_ciudad)
+  
+  sum_x2 <- sum(x_i$x_i^2, na.rm = TRUE)
+  
+  var_G  <- 2 * (1 - sum_x2)^2 * (1 - eg$H)^2 / (N * (N - 1))
+  se_gamma <- sqrt(var_G) / ((1 - sum_x2) * (1 - eg$H))
+  z_stat   <- eg$gamma_EG / se_gamma
+  p_value  <- 2 * (1 - pnorm(abs(z_stat)))
+  
+  return(list(
+    gamma_EG = eg$gamma_EG,
+    se       = round(se_gamma, 4),
+    z_stat   = round(z_stat, 4),
+    p_value  = round(p_value, 4)
+  ))
+}
+
+# Calcular para CIIU 192
+eg_sig_192 <- calc_eg_sig(calzado_192, data)
+
+# Calcular para cada CIIU4
+eg_sig_ciiu4 <- calzado_192 %>%
+  group_by(ciiu_4) %>%
+  group_map(~ calc_eg_sig(.x, data)) %>%
+  bind_rows() %>%
+  mutate(ciiu_4 = sort(unique(calzado_192$ciiu_4)))
+
+# Ver resultados
+eg_sig_192
+eg_sig_ciiu4
+```
+```{r}
+#| label: eg-final
+#| message: false
+#| warning: false
+
+# Tabla completa con significancia
+bind_rows(
+  tibble(
+    ciiu_4      = 192,
+    Descripción = "Fabricación de calzado (Total)",
+    gamma_EG    = eg_sig_192$gamma_EG,
+    se          = eg_sig_192$se,
+    z_stat      = eg_sig_192$z_stat,
+    p_value     = eg_sig_192$p_value
+  ),
+  eg_sig_ciiu4 %>%
+    mutate(Descripción = case_when(
+      ciiu_4 == 1921 ~ "Fabricación de calzado de cuero y piel",
+      ciiu_4 == 1922 ~ "Fabricación de calzado de materiales textiles",
+      ciiu_4 == 1923 ~ "Fabricación de calzado de caucho",
+      ciiu_4 == 1924 ~ "Fabricación de calzado de plástico",
+      ciiu_4 == 1925 ~ "Fabricación de calzado deportivo",
+      ciiu_4 == 1926 ~ "Fabricación de partes del calzado",
+      ciiu_4 == 1929 ~ "Fabricación de calzado NCP"
+    ))
+) %>%
+  mutate(
+    Significancia = case_when(
+      p_value < 0.01 ~ "***",
+      p_value < 0.05 ~ "**",
+      p_value < 0.10 ~ "*",
+      TRUE           ~ ""
+    ),
+    Concentración = case_when(
+      gamma_EG < 0     ~ "Dispersión",
+      gamma_EG < 0.02  ~ "Baja",
+      gamma_EG <= 0.05 ~ "Moderada",
+      gamma_EG > 0.05  ~ "Alta"
+    )
+  ) %>%
+  select(`Código CIIU` = ciiu_4, Descripción,
+         `$\\hat{\\gamma}_{EG}$` = gamma_EG,
+         `Error Est.` = se,
+         `Z` = z_stat,
+         `p-valor` = p_value,
+         Sig. = Significancia,
+         Concentración) %>%
+  kable(align = c("c", "l", "c", "c", "c", "c", "c", "c"),
+        caption = "Índice de Ellison y Glaeser con significancia estadística - Fabricación de Calzado, Cali 2005") %>%
+  kable_styling(
+    bootstrap_options = c("striped", "hover", "condensed"),
+    full_width = FALSE
+  ) %>%
+  row_spec(0, bold = TRUE) %>%
+  row_spec(1, bold = TRUE, background = "#f0f0f0") %>%
+  footnote(general = "*** p<0.01, ** p<0.05, * p<0.10")
+```
+
+### Interpretación
+
+El sector de fabricación de calzado en su conjunto (CIIU 192) presenta un índice \( \hat{\gamma}_{EG} = 0.1186 \), clasificado como alta concentración geográfica y estadísticamente significativo al 1\% (\( p < 0.01 \)). Este resultado indica que el patrón de localización observado en Cali no se debe únicamente al azar. A diferencia del mapa de densidad del Punto 1, que permite identificar visualmente los núcleos de localización, el índice de Ellison y Glaeser confirma de manera formal que dicha concentración persiste incluso después de controlar por la estructura de tamaño de las empresas.
+
+En términos económicos, esto sugiere que la localización de las firmas del sector responde a ventajas específicas de ciertas zonas urbanas, como la cercanía a redes de comercialización, la disponibilidad de insumos, el acceso a mano de obra y la reducción de costos de coordinación entre establecimientos. Por tanto, la localización del sector calzado en Cali parece reflejar una organización productiva localizada, más que una simple dispersión aleatoria de pequeños talleres dentro de la ciudad.
+
+Al desagregar por subsector CIIU 4, se observan diferencias importantes. Los subsectores con mayor concentración geográfica significativa son la fabricación de calzado de caucho (1923, \( \hat{\gamma}_{EG} = 0.3129 \), \( p < 0.01 \)), calzado NCP (1929, \( \hat{\gamma}_{EG} = 0.2132 \), \( p < 0.01 \)), calzado de plástico (1924, \( \hat{\gamma}_{EG} = 0.1002 \), \( p < 0.05 \)) y calzado de cuero y piel (1921, \( \hat{\gamma}_{EG} = 0.0785 \), \( p < 0.01 \)). Esto indica que, dentro del sector, algunos segmentos presentan una mayor tendencia a agruparse espacialmente, posiblemente porque dependen más de vínculos locales de abastecimiento, producción o comercialización.
+
+Por el contrario, los subsectores de calzado de materiales textiles (1922), calzado deportivo (1925) y partes del calzado (1926) no presentan evidencia estadísticamente significativa de concentración geográfica. Esto sugiere que, en estos casos, la distribución espacial de las firmas es más dispersa o menos sistemática, sin una dinámica clara de aglomeración dentro de la ciudad.
+
+En conjunto, el índice de Ellison y Glaeser complementa los resultados del mapa y del IHH. Mientras el mapa del Punto 1 mostró dónde se ubican las mayores densidades y el IHH evidenció que el sector está conformado por muchas firmas pequeñas, el EG permite concluir que esas firmas pequeñas además tienden a concentrarse geográficamente en determinadas áreas de Cali. En ese sentido, este índice aporta evidencia estadística de que la concentración observada visualmente corresponde a un patrón de aglomeración sectorial y no solo a una acumulación casual de establecimientos.
+
+
+## 2.3 Índice de Maurel y Sédillot (MS)
+
+El índice de Maurel y Sédillot (1999) es una extensión del índice de Ellison y Glaeser que pondera por el tamaño de la empresa, corrigiendo la posible correlación entre el tamaño de la planta y la concentración geográfica. La interpretación de la escala es equivalente a la del índice EG:
+- $\hat{\gamma}_{MS} < 0$: dispersión geográfica
+- $\hat{\gamma}_{MS} < 0.02$: baja concentración geográfica
+- $0.02 \leq \hat{\gamma}_{MS} \leq 0.05$: moderada concentración geográfica
+- $\hat{\gamma}_{MS} > 0.05$: alta concentración geográfica
+
+```{r}
+#| label: ms
+#| message: false
+#| warning: false
+
+# Función para calcular el índice MS
+calc_ms <- function(df_sector, df_total, geo_var = "cod_comuna", emp_var = "ue026a1_nu") {
+  
+  # Empleo total del sector
+  emp_total_sector <- sum(df_sector[[emp_var]], na.rm = TRUE)
+  
+  # Participación de cada empresa en el empleo sectorial (z_j)
+  df_sector <- df_sector %>%
+    mutate(z_j = .data[[emp_var]] / emp_total_sector)
+  
+  # IHH
+  H <- sum(df_sector$z_j^2, na.rm = TRUE)
+  
+  # Participación del empleo sectorial por área (s_i) — ponderado por empleo
+  s_i <- df_sector %>%
+    group_by(.data[[geo_var]]) %>%
+    summarise(emp_sector = sum(.data[[emp_var]], na.rm = TRUE)) %>%
+    mutate(s_i = emp_sector / emp_total_sector)
+  
+  # Participación del empleo total por área (x_i)
+  emp_total_ciudad <- sum(df_total[[emp_var]], na.rm = TRUE)
+  
+  x_i <- df_total %>%
+    group_by(.data[[geo_var]]) %>%
+    summarise(emp_total_area = sum(.data[[emp_var]], na.rm = TRUE)) %>%
+    mutate(x_i = emp_total_area / emp_total_ciudad)
+  
+  # Unir
+  indices <- s_i %>%
+    left_join(x_i, by = geo_var) %>%
+    mutate(s_i2 = s_i^2,
+           x_i2 = x_i^2)
+  
+  # G_MS = sum(s_i^2) - sum(x_i^2)
+  G_MS   <- sum(indices$s_i2, na.rm = TRUE) - sum(indices$x_i2, na.rm = TRUE)
+  sum_x2 <- sum(indices$x_i2, na.rm = TRUE)
+  
+  # gamma MS
+  gamma_MS <- (G_MS / (1 - sum_x2) - H) / (1 - H)
+  
+  return(list(gamma_MS = round(gamma_MS, 4), H = round(H, 4), G_MS = round(G_MS, 4)))
+}
+
+# Calcular MS para CIIU 192
+ms_192 <- calc_ms(calzado_192, data)
+
+# Calcular MS para cada CIIU4
+ms_ciiu4 <- calzado_192 %>%
+  group_by(ciiu_4) %>%
+  group_map(~ calc_ms(.x, data)) %>%
+  bind_rows() %>%
+  mutate(ciiu_4 = sort(unique(calzado_192$ciiu_4)),
+         Descripción = case_when(
+           ciiu_4 == 1921 ~ "Fabricación de calzado de cuero y piel",
+           ciiu_4 == 1922 ~ "Fabricación de calzado de materiales textiles",
+           ciiu_4 == 1923 ~ "Fabricación de calzado de caucho",
+           ciiu_4 == 1924 ~ "Fabricación de calzado de plástico",
+           ciiu_4 == 1925 ~ "Fabricación de calzado deportivo",
+           ciiu_4 == 1926 ~ "Fabricación de partes del calzado",
+           ciiu_4 == 1929 ~ "Fabricación de calzado NCP"
+         ),
+         Concentración = case_when(
+           gamma_MS < 0     ~ "Dispersión",
+           gamma_MS < 0.02  ~ "Baja",
+           gamma_MS <= 0.05 ~ "Moderada",
+           gamma_MS > 0.05  ~ "Alta"
+         ))
+
+# Tabla
+bind_rows(
+  tibble(
+    ciiu_4      = 192,
+    Descripción = "Fabricación de calzado (Total)",
+    gamma_MS    = ms_192$gamma_MS,
+    Concentración = case_when(
+      ms_192$gamma_MS < 0     ~ "Dispersión",
+      ms_192$gamma_MS < 0.02  ~ "Baja",
+      ms_192$gamma_MS <= 0.05 ~ "Moderada",
+      ms_192$gamma_MS > 0.05  ~ "Alta"
+    )
+  ),
+  ms_ciiu4
+) %>%
+  select(`Código CIIU` = ciiu_4, Descripción,
+         `$\\hat{\\gamma}_{MS}$` = gamma_MS,
+         Concentración) %>%
+  kable(align = c("c", "l", "c", "c"),
+        caption = "Índice de Maurel y Sédillot - Fabricación de Calzado, Cali 2005") %>%
+  kable_styling(
+    bootstrap_options = c("striped", "hover", "condensed"),
+    full_width = FALSE
+  ) %>%
+  row_spec(0, bold = TRUE) %>%
+  row_spec(1, bold = TRUE, background = "#f0f0f0")
+```
+
+### Interpretación
+
+A diferencia del índice de Ellison y Glaeser, el índice de Maurel y Sédillot incorpora de manera más explícita el tamaño de las empresas, por lo que permite evaluar si la concentración espacial observada se mantiene una vez se considera el peso relativo de los establecimientos. Para el sector de fabricación de calzado en su conjunto (CIIU 192), se obtiene un valor de \( \hat{\gamma}_{MS} = -0.0114 \), lo que indica dispersión geográfica cuando se pondera por el tamaño de las firmas. En relación con los resultados anteriores, esto sugiere que la concentración detectada por el índice EG no se distribuye de manera homogénea entre todos los establecimientos del sector, y que el tamaño relativo de algunas firmas influye en el patrón espacial observado.
+
+Este resultado complementa lo encontrado en el Punto 1 y en el índice EG. Mientras el mapa de densidad mostró una concentración visual de establecimientos y el EG confirmó que esa concentración era estadísticamente significativa, el índice de Maurel y Sédillot indica que dicha aglomeración pierde fuerza al considerar más explícitamente el tamaño empresarial. En otras palabras, la concentración espacial del sector calzado en Cali parece estar asociada principalmente a la localización conjunta de numerosos establecimientos pequeños, pero no necesariamente a una concentración del peso económico del sector en esas mismas zonas.
+
+Al desagregar por subsector CIIU 4, el panorama es más heterogéneo. Los subsectores de calzado de caucho (1923, \( \hat{\gamma}_{MS} = 0.2190 \)), calzado deportivo (1925, \( \hat{\gamma}_{MS} = 0.1261 \)), partes del calzado (1926, \( \hat{\gamma}_{MS} = 0.0864 \)) y calzado NCP (1929, \( \hat{\gamma}_{MS} = 0.0837 \)) muestran alta concentración incluso después de controlar por tamaño, lo que indica que en estos subsectores la aglomeración es más robusta y no depende únicamente de la distribución del empleo entre firmas. Por el contrario, el calzado de materiales textiles (1922, \( \hat{\gamma}_{MS} = -0.0513 \)) muestra dispersión, mientras que el calzado de cuero y piel (1921) y el calzado de plástico (1924) presentan baja concentración. Esto sugiere que, en estos subsectores, el tamaño empresarial tiene un papel más importante en la explicación de los patrones espaciales observados.
+
+En conjunto, el índice de Maurel y Sédillot añade un matiz importante al análisis del Punto 1 y del Punto 2.2: aunque visualmente y según el EG el sector calzado parece concentrado en ciertas áreas de Cali, esa concentración no siempre se mantiene cuando se incorpora de forma más estricta la dimensión del tamaño empresarial. Por ello, el MS permite distinguir entre una aglomeración espacial generalizada y una concentración más asociada al peso relativo de ciertos establecimientos dentro del sector.
+
+## 2.4 Location Quotient (LQ) e Industry Quotient (IQ)
+
+El cociente de localización (LQ) mide el grado de especialización de cada unidad espacial en un sector determinado, comparando la participación del empleo sectorial en el área con la participación del empleo sectorial en el total de la ciudad. El cociente de empleo industrial (IQ) hace la comparación inversa: mide qué tan concentrada está una industria en una localización particular. Formalmente:
+$$LQ_i^s = \frac{s_i^s}{x_i} \qquad IQ_i^s = \frac{c_i^s}{x^s}$$
+
+Valores superiores a 1 indican que la localización está relativamente especializada en el sector (LQ) o que el sector está relativamente concentrado en esa localización (IQ).
+```{r}
+#| label: lq-iq
+#| message: false
+#| warning: false
+
+# Empleo total de la ciudad
+emp_ciudad <- sum(data$ue026a1_nu, na.rm = TRUE)
+
+# Empleo del sector 192 en la ciudad
+emp_sector_ciudad <- sum(calzado_192$ue026a1_nu, na.rm = TRUE)
+
+# Empleo por comuna - total ciudad
+emp_comuna_total <- data %>%
+  group_by(cod_comuna) %>%
+  summarise(emp_total_comuna = sum(ue026a1_nu, na.rm = TRUE)) %>%
+  mutate(x_i = emp_total_comuna / emp_ciudad)
+
+# Empleo del sector 192 por comuna
+emp_comuna_sector <- calzado_192 %>%
+  group_by(cod_comuna) %>%
+  summarise(emp_sector_comuna = sum(ue026a1_nu, na.rm = TRUE)) %>%
+  mutate(s_i = emp_sector_comuna / emp_sector_ciudad)
+
+# Calcular LQ e IQ
+lq_iq <- emp_comuna_sector %>%
+  left_join(emp_comuna_total, by = "cod_comuna") %>%
+  mutate(
+    LQ = s_i / x_i,
+    x_s = emp_sector_ciudad / emp_ciudad,
+    c_i = emp_sector_comuna / emp_total_comuna,
+    IQ  = c_i / x_s,
+    especialización_LQ = ifelse(LQ > 1, "Especializada", "No especializada"),
+    especialización_IQ = ifelse(IQ > 1, "Concentrada", "No concentrada")
+  ) %>%
+  arrange(desc(LQ))
+
+# Tabla top 10 comunas
+lq_iq %>%
+  head(10) %>%
+  select(
+    `Comuna` = cod_comuna,
+    `Emp. Sector` = emp_sector_comuna,
+    `Emp. Total` = emp_total_comuna,
+    `LQ` = LQ,
+    `IQ` = IQ,
+    `Especialización` = especialización_LQ
+  ) %>%
+  mutate(
+    LQ = round(LQ, 3),
+    IQ = round(IQ, 3)
+  ) %>%
+  kable(align = c("c", "c", "c", "c", "c", "l"),
+        caption = "Location Quotient e Industry Quotient por comuna - Fabricación de Calzado (CIIU 192), Cali 2005") %>%
+  kable_styling(
+    bootstrap_options = c("striped", "hover", "condensed"),
+    full_width = FALSE
+  ) %>%
+  row_spec(0, bold = TRUE)
+```
+
+```{r}
+# Verificar valores intermedios
+lq_iq %>%
+  select(cod_comuna, s_i, x_i, c_i, x_s, LQ, IQ) %>%
+  head(5)
+```
+
+### Interpretación
+
+Los resultados del \(LQ\) confirman que la industria del calzado presenta una marcada especialización espacial en varias comunas de Cali. Las comunas con mayor especialización son la Comuna 18 (\(LQ = 3.59\)), Comuna 9 (\(LQ = 3.35\)) y Comuna 13 (\(LQ = 3.27\)), todas con valores muy superiores a 1. Esto indica que, en estas comunas, la participación del empleo en fabricación de calzado dentro del empleo total local es entre 3 y 4 veces mayor que la participación del sector en el empleo total de la ciudad.
+
+Estos resultados complementan la evidencia del Punto 1. Mientras el mapa de distribución de puntos y densidad permitió identificar las zonas donde se concentraban visualmente los establecimientos del sector, el \(LQ\) muestra que varias de esas mismas áreas también presentan una especialización relativa en calzado dentro de su estructura económica. En este sentido, el indicador no solo señala dónde hay más empresas o más empleo sectorial, sino dónde esta actividad tiene un peso particularmente alto frente al resto de actividades económicas de la comuna.
+
+La Comuna 9, que ya había sido identificada como el núcleo de mayor densidad en los mapas de distribución de puntos, se confirma aquí como la zona de mayor concentración absoluta de empleo en calzado (464 empleados), mientras que la Comuna 18 lidera en términos de especialización relativa. Esto sugiere que la Comuna 9 funciona como un núcleo central de concentración del sector, mientras que la Comuna 18 destaca porque el calzado ocupa allí un lugar especialmente importante dentro de la estructura productiva local.
+
+En conjunto, los resultados indican que la concentración espacial del sector calzado en Cali no solo se manifiesta en términos absolutos, como ya se observó en el Punto 1, sino también en términos relativos de especialización territorial. El hecho de que las diez primeras comunas presenten valores de \(LQ\) superiores a 1.5 evidencia una fuerte especialización sectorial en la franja centro-norte y centro-oriente de la ciudad, consistente con los patrones espaciales identificados previamente.
+
+En este ejercicio, los valores del \(LQ\) y del \(IQ\) coinciden exactamente para todas las comunas. Esto no obedece a un error de cálculo, sino a que, con las definiciones utilizadas en las diapositivas del curso, ambos indicadores son algebraicamente equivalentes. En efecto, el \(LQ\) se define como \(LQ_i^s = s_i^s / x_i\), mientras que el \(IQ\) se define como \(IQ_i^s = c_i^s / x^s\). Al reemplazar estas participaciones por sus respectivas expresiones en términos de empleo, ambas fórmulas se reducen al mismo cociente.
+
+Por esta razón, la interpretación empírica de ambos índices es idéntica en este caso. En particular, los valores superiores a 1 indican que la comuna presenta una especialización relativa en la fabricación de calzado mayor a la esperada dado su peso en el empleo total de la ciudad. Así, comunas como la 18, 9 y 13 destacan como las más especializadas en esta actividad dentro de Cali en 2005.
+
+En consecuencia, para este ejercicio ambos indicadores aportan la misma evidencia sobre la especialización espacial del sector.
+
+
+# Punto 3: Mapa del LQ
+
+::: {.callout-note title="Punto 3 del Taller"}
+Haga el mapa del LQ e interprete.
+:::
+```{r}
+#| label: fig-mapa-lq
+#| fig-cap: "Location Quotient por comuna - Fabricación de Calzado (CIIU 192), Cali 2005"
+#| message: false
+#| warning: false
+
+# Unir LQ al shapefile de barrios por comuna
+barrios_lq <- barriosCali %>%
+  left_join(
+    lq_iq %>% select(cod_comuna, LQ),
+    by = c("NumComuna" = "cod_comuna")
+  )
+
+# Mapa del LQ
+ggplot() +
+  geom_sf(
+    data = barrios_lq,
+    aes(fill = LQ),
+    color = "gray50",
+    linewidth = 0.2
+  ) +
+  scale_fill_viridis_c(
+    option = "viridis",
+    name = "LQ",
+    na.value = "gray90",
+    breaks = c(0, 1, 2, 3, 4),
+    labels = c("0", "1", "2", "3", "4")
+  ) +
+  geom_sf_text(
+    data = barrios_lq %>%
+      group_by(NumComuna) %>%
+      summarise(
+        geometry = st_centroid(st_union(geometry)),
+        LQ = mean(LQ, na.rm = TRUE),
+        .groups = "drop"
+      ) %>%
+      filter(!is.na(LQ)),
+    aes(label = NumComuna),
+    size = 2.5,
+    color = "white",
+    fontface = "bold"
+  ) +
+  labs(
+    title = "Especialización en Fabricación de Calzado (CIIU 192)",
+    subtitle = "Location Quotient por comuna, Cali 2005"
+  ) +
+  theme_void() +
+  theme(
+    plot.title = element_text(size = 11, face = "bold", hjust = 0.5),
+    plot.subtitle = element_text(size = 9, hjust = 0.5, color = "gray40"),
+    legend.position = "right"
+  )
+```
+
+## Interpretación
+
+El mapa del \(LQ\) confirma y complementa visualmente los patrones identificados en el análisis previo. En particular, se observan dos áreas de alta especialización relativa en la fabricación de calzado.
+
+La Comuna 18 (amarillo intenso, \(LQ = 3.59\)) emerge como la zona de mayor especialización relativa de toda la ciudad. Le siguen las Comunas 9, 13 y 15 (tonos verde-amarillo, con \(LQ\) entre 3.0 y 3.4), que conforman un corredor de especialización en la franja centro-oriental de Cali. Este resultado es consistente con lo observado en el Punto 1, donde varias de estas comunas ya aparecían asociadas a una alta densidad de establecimientos del sector.
+
+El mapa también permite distinguir entre concentración absoluta y especialización relativa. Por ejemplo, la Comuna 9 se mantiene como un núcleo importante del sector, pero la Comuna 18 destaca aún más en términos relativos, ya que el calzado representa allí una proporción especialmente alta dentro del empleo local. En otras palabras, mientras algunas comunas concentran un mayor número de empresas o de empleo del sector, otras sobresalen porque esta actividad tiene un peso particularmente importante dentro de su estructura económica.
+
+Las comunas representadas en tonos morados presentan niveles bajos de especialización relativa, es decir, una participación del empleo en calzado inferior o apenas comparable al promedio de la ciudad. Esto sugiere que en esas zonas el sector no constituye una actividad dominante dentro de la estructura económica local. Por su parte, las zonas grises corresponden a comunas sin registro de empleo sectorial o sin valor calculado del índice en la base utilizada.
+
+En conjunto, el patrón espacial del \(LQ\) muestra que la fabricación de calzado en Cali no solo se concentra en términos absolutos, sino que además presenta una especialización territorial marcada en ciertas comunas del centro-occidente y centro-oriente de la ciudad. Esta evidencia es consistente con la idea de que la actividad se organiza alrededor de corredores urbanos específicos, donde el sector adquiere una importancia relativa mayor dentro de la economía local.
+
+
+# Punto 4: Funciones de Distancia
+
+::: {.callout-note title="Punto 4 del Taller"}
+Estime las funciones de Duranton y Overman (2005) y de Marcon y Puech (2010). Interprete los resultados en términos de la localización de las mayores densidades y de la distancia a la que se encuentran las empresas. Recuerde dar una explicación con contexto de la industria analizada en Cali.
+:::
+
+## 4.1 Función $K_d$ de Duranton y Overman (2005)
+
+La función $K_d$ es una función de densidad de probabilidad que mide la frecuencia relativa de pares de empresas que se encuentran a una distancia dada. A diferencia de los índices anteriores, esta medida trata el espacio como continuo y evita el problema de la Unidad de Área Modificable (MAUP). Los valores de $\hat{K}_d$ se comparan con un intervalo de confianza bajo la hipótesis nula de distribución aleatoria, cuando la función se encuentra por encima del intervalo superior hay evidencia de aglomeración, y cuando se encuentra por debajo del intervalo inferior hay evidencia de dispersión (Duranton y Overman, 2005).
+```{r}
+#| label: fig-kd
+#| fig-cap: "Función Kd de Duranton y Overman - Fabricación de Calzado (CIIU 192), Cali 2005"
+#| message: false
+#| warning: false
+
+library(sf)
+library(dplyr)
+library(ggplot2)
+library(tidyr)
+
+# 1. Preparar datos
+obs_xy <- calzado_192 %>%
+  st_drop_geometry() %>%
+  transmute(
+    x = as.numeric(x),
+    y = as.numeric(y)
+  ) %>%
+  filter(!is.na(x), !is.na(y)) %>%
+  distinct()
+
+n_firms <- nrow(obs_xy)
+
+# Polígono de Cali para simular ubicaciones aleatorias
+cali_poly <- st_union(barriosCali)
+
+# 2. Funciones auxiliares
+get_pair_distances <- function(xy_df) {
+  dmat <- as.matrix(dist(as.matrix(xy_df[, c("x", "y")])))
+  dmat[upper.tri(dmat)]
+}
+
+kd_from_distances <- function(dvec, r_grid, bw) {
+  den <- density(
+    dvec,
+    from = min(r_grid),
+    to   = max(r_grid),
+    bw   = bw,
+    n    = length(r_grid),
+    cut  = 0
+  )
+  approx(den$x, den$y, xout = r_grid, rule = 2)$y
+}
+
+# 3. Kd observada
+r_grid <- seq(0, 10000, by = 100)
+
+obs_dist <- get_pair_distances(obs_xy)
+
+# Mismo bandwidth para la observada y las simulaciones
+bw_kd <- bw.nrd0(obs_dist)
+
+kd_obs <- kd_from_distances(obs_dist, r_grid, bw = bw_kd)
+
+# 4. Simulaciones aleatorias
+set.seed(123)
+
+nsim <- 200
+
+sim_kd_mat <- replicate(nsim, {
+  sim_pts <- st_sample(cali_poly, size = n_firms, type = "random", exact = TRUE)
+  sim_xy  <- as.data.frame(st_coordinates(sim_pts))
+  names(sim_xy) <- c("x", "y")
+
+  sim_dist <- get_pair_distances(sim_xy)
+  kd_from_distances(sim_dist, r_grid, bw = bw_kd)
+})
+
+# 5. Bandas de confianza
+kd_df <- tibble(
+  r     = r_grid,
+  obs   = kd_obs,
+  mmean = rowMeans(sim_kd_mat),
+  lo    = apply(sim_kd_mat, 1, quantile, probs = 0.025),
+  hi    = apply(sim_kd_mat, 1, quantile, probs = 0.975)
+)
+
+# 6. Gráfico
+ggplot(kd_df, aes(x = r)) +
+  geom_ribbon(aes(ymin = lo, ymax = hi, fill = "Bandas de confianza"), alpha = 0.25) +
+  geom_line(aes(y = obs, color = "Valor observado de Kd"), linewidth = 0.8) +
+  geom_line(aes(y = mmean, color = "Media muestral de Kd en las simulaciones"),
+            linewidth = 0.8, linetype = "dashed") +
+  scale_color_manual(
+    name = "Kd",
+    values = c(
+      "Valor observado de Kd" = "black",
+      "Media muestral de Kd en las simulaciones" = "red"
+    )
+  ) +
+  scale_fill_manual(
+    name = "Bandas de confianza",
+    values = c("Bandas de confianza" = "grey70")
+  ) +
+  labs(
+    title = expression(paste("Función ", K[d], " - Fabricación de Calzado (CIIU 192)")),
+    x = "Distancia (metros)",
+    y = expression(hat(K)[d](r))
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(size = 11, face = "bold", hjust = 0.5),
+    legend.position = "right"
+  )
+
+```
+
+## Interpretación
+
+La función \(K_d\) muestra evidencia clara de aglomeración espacial de las empresas del sector calzado en Cali a distancias cortas e intermedias. En particular, la curva observada se ubica por encima de la banda superior de confianza aproximadamente desde los primeros cientos de metros y hasta cerca de los 5.800 o 6.000 metros. Esto indica que, dentro de ese rango, la densidad de pares de empresas es mayor a la que se esperaría bajo una distribución aleatoria, por lo que existe una tendencia significativa a la localización cercana entre establecimientos del sector.
+
+El mayor exceso de densidad se observa aproximadamente entre 4.000 y 5.000 metros, donde la curva observada alcanza su máximo y se separa con mayor claridad de la media simulada. Este resultado es consistente con lo encontrado en el Punto 1, donde las mayores densidades del sector se localizaban en la Comuna 9, particularmente en barrios como Sucre y Barrio Obrero, así como en otras zonas del eje centro-oriente de la ciudad. En otras palabras, las empresas del sector calzado no solo se concentran en áreas específicas de Cali, sino que además tienden a encontrarse entre sí a distancias urbanas relativamente cortas e intermedias, compatibles con corredores productivos y comerciales dentro de la ciudad.
+
+A partir de aproximadamente 6.000 metros, la curva observada cae con rapidez y pasa a ubicarse por debajo de la banda inferior de confianza en buena parte del tramo final, especialmente entre 6.500 y 10.000 metros. Esto indica dispersión a distancias largas: hay menos pares de empresas separados por esas distancias de los que se esperaría si las firmas estuvieran distribuidas aleatoriamente. Por tanto, la industria no se reparte de manera homogénea en todo el espacio urbano, sino que se organiza alrededor de núcleos relativamente próximos entre sí.
+
+En términos económicos, este patrón es coherente con el contexto de la industria del calzado en Cali. Se trata de una actividad tradicional, intensiva en trabajo y vinculada históricamente a talleres, comercio mayorista y redes locales de abastecimiento. Por ello, resulta razonable que las empresas busquen localizarse cerca unas de otras, aprovechando economías de aglomeración como el acceso compartido a insumos, mano de obra con experiencia específica y proximidad a circuitos de comercialización. Así, la función \(K_d\) complementa los resultados previos al mostrar no solo que las mayores densidades se ubican en zonas concretas de Cali, sino también que esa aglomeración opera principalmente a escalas espaciales cortas e intermedias.
+
+
+## 4.2 Función $M$ de Marcon y Puech (2010)
+
+La función \(M\) de Marcon y Puech expresa la concentración espacial de manera relativa, comparando la densidad observada de pares de empresas a cada distancia con la densidad esperada bajo una localización aleatoria. A diferencia de la función \(K_d\), sus valores son más fáciles de interpretar: \(M = 1\) indica distribución aleatoria, \(M > 1\) indica concentración geográfica y \(M < 1\) indica dispersión geográfica. Cuando la función se ubica por fuera de las bandas de confianza y es mayor que 1, existe concentración significativa; cuando es menor que 1 y está por fuera de las bandas, existe dispersión significativa. 
+
+```{r}
+#| label: fig-m
+#| fig-cap: "Función M de Marcon y Puech - Fabricación de Calzado (CIIU 192), Cali 2005"
+#| message: false
+#| warning: false
+#| dev: ragg_png
+
+# Construir la función M a partir de la Kd observada y simulada
+m_df <- kd_df %>%
+  mutate(
+    M    = obs / mmean,
+    lo_M = lo / mmean,
+    hi_M = hi / mmean
+  )
+
+ggplot(m_df, aes(x = r)) +
+  geom_ribbon(
+    aes(ymin = lo_M, ymax = hi_M, fill = "Bandas de confianza"),
+    alpha = 0.25
+  ) +
+  geom_hline(yintercept = 1, linetype = "dotted", color = "gray40") +
+  geom_line(
+    aes(y = M, color = "Valor observado de M"),
+    linewidth = 0.8
+  ) +
+  scale_color_manual(
+    name = "M",
+    values = c("Valor observado de M" = "black")
+  ) +
+  scale_fill_manual(
+    name = "Bandas de confianza",
+    values = c("Bandas de confianza" = "grey70")
+  ) +
+  labs(
+    title = "Función M - Fabricación de Calzado (CIIU 192)",
+    x = "Distancia (metros)",
+    y = "M(r)"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(size = 11, face = "bold", hjust = 0.5),
+    legend.position = "right"
+  )
+```
+
+
+## Interpretación
+
+La función \(M\) confirma que la industria del calzado en Cali presenta una concentración geográfica marcada a distancias cortas e intermedias. De acuerdo con la interpretación de Marcon y Puech, valores de \(M(r) > 1\) indican concentración relativa, mientras que valores inferiores a 1 indican dispersión. En el gráfico, la curva observada se ubica claramente por encima de 1 desde las distancias más cortas hasta aproximadamente los 6.000 metros, lo que implica que, dentro de ese rango, la densidad relativa de empresas del sector es mayor a la que se esperaría bajo una distribución aleatoria. 
+
+El mayor nivel de concentración se presenta a distancias muy cortas, especialmente en los primeros cientos de metros, donde la función alcanza valores muy superiores a 1. Esto sugiere que existe una fuerte tendencia a la localización cercana entre establecimientos del sector. Posteriormente, aunque la intensidad de la concentración disminuye, la función se mantiene por encima de 1 en buena parte del tramo entre aproximadamente 1.000 y 5.500 metros, con un repunte alrededor de los 4.000 a 5.000 metros. En términos espaciales, esto es consistente con lo observado en el Punto 1: las mayores densidades se ubican en sectores concretos de Cali, especialmente en la Comuna 9 y en barrios como Sucre y Barrio Obrero, así como en otros sectores del eje centro-oriente de la ciudad.
+
+A partir de cerca de los 6.000 metros, la función cruza el umbral de 1 y se mantiene por debajo de ese valor hasta el final del rango considerado. Esto indica dispersión a distancias largas: hay menos pares de empresas separados por esas distancias de los que se esperarían bajo aleatoriedad. En otras palabras, las empresas del sector no están distribuidas homogéneamente en toda la ciudad, sino agrupadas en núcleos relativamente próximos entre sí y menos conectadas entre extremos urbanos más alejados. 
+
+En términos económicos, este patrón es coherente con el contexto de la industria del calzado en Cali. Se trata de una actividad tradicional, asociada a talleres, comercio mayorista, redes locales de proveedores y mano de obra con experiencia específica. Por ello, resulta razonable que las empresas busquen ubicarse cerca unas de otras para reducir costos de coordinación, facilitar el acceso a insumos y aprovechar circuitos urbanos de comercialización. Así, la función \(M\) refuerza la evidencia previa del taller al mostrar que la concentración del sector calzado en Cali no solo existe, sino que es especialmente intensa a escalas espaciales cortas e intermedias.
+
+
+# Referencias
+
+Banco de la República de Colombia, & Departamento Administrativo Nacional de Estadística. (2005). Informe de coyuntura económica regional: Departamento del Valle del Cauca, primer semestre de 2005. Banco de la República.
+
+Banco de la República de Colombia, & Departamento Administrativo Nacional de Estadística. (2005b). Informe de coyuntura económica regional: Departamento del Valle del Cauca, segundo semestre de 2005. DANE
+
+Cámara de Comercio de Cali. (2006). Cuadros de salida censo económico Cali-Yumbo 2005. Cámara de Comercio de Cali.
+
+Departamento Administrativo Nacional de Estadística. (2005). Censo económico de Cali y Yumbo 2005: Documento metodológico. Cámara de Comercio de Cali.
+
+Duranton, G., & Puga, D. (2004). Micro-foundations of urban agglomeration economies. In Handbook of regional and urban economics (Vol. 4, pp. 2063-2117). Elsevier.
+
+García, G. y Moreno-Monroy, A. (2016). Intra-metropolitan Clustering of Formal and Informal Manufacturing Activity:=Evidence from Cali, Colombia, Tijdschrift voor economische en sociale geografie, 107(4):389–406.
+
+Portafolio. (2006a, 31 de marzo). Ventas del sector calzado siguen con “paso” lento.
+
+Portafolio. (2006b, 3 de febrero). Las importaciones y el contrabando asfixian a los productores de calzado.
