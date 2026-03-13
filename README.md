@@ -99,7 +99,7 @@ De manera general, el trabajo encuentra que:
 
 La versión web del trabajo está disponible en GitHub Pages:
 
-**[Agregar aquí el enlace de la página cuando se active GitHub Pages]**
+https://smoralesl1803.github.io/taller3-econometria-espacial/Taller3.html#taller-3
 
 ## Referencias
 
